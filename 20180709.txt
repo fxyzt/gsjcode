@@ -1,0 +1,984 @@
+
+
+  
+ 
+  ; -------中断复位地址  用到了 定时器012中断 （下面会介绍每个定时器分别用来实现啥功能）。 和比较器中断  还有adc中断测电压---
+ 
+  ORG 00H
+LJMP 100H
+
+
+ORG  002BH
+LJMP  400H;ADC中断入口
+
+ ORG  00ABH; 比较器入口地址
+ LJMP  350H
+
+   ORG  0BH;  定时器0中断入口地址。
+ LJMP  450H;
+  
+  ORG  1BH   ; 定时器1中断入口，跳转到发射程序
+LJMP 550H ; 300H存放发射数据的计时。
+
+  ORG  0063H
+  LJMP 650H	;定时器2中断入口 用来计数单边半周期的延迟值	，若延时值不到达则 溢出延迟值中断设为半周期
+              ;定时器2延迟一个固定的时间t2 ，在没有谐振状态时 使G极输出固定频率方波，方波形状为G1G2 处于10 11 01然后再重复10 11 01一直 
+			  ; 重复循环这三个状态01 和10 是G极交替导通 11 是死区的时段 ，这三个状态每个状态延迟都是固定t2时间。
+			  ;若出现谐振时进入死区 在t2时段内就出现比较器中断 
+
+
+
+
+ 
+
+
+
+
+      ; -----------头文件 对寄存器地址命名
+										    
+	 ;      TMOD DATA 89H ;标识ram定时器计数器工作模式寄存器手册593页讲tmod
+	   AUXR  DATA 8EH; 辅助寄存器 534页	
+	   INT_CLKO  DATA 8FH;595页 t0 1 2 的时钟输出寄存器和外部中断允许INT_CLKO(AUXR2)
+	   TH2 DATA 0D6H  ;
+	   TL2 DATA 0D7H   ;
+	   IE2 DATA  0AFH ;定时器T2 T3 T4的中端控制寄存器
+       
+	   
+	   CMPCR1  DATA 0E6H; 
+	   CMPCR2  DATA 0E7H;        比较器相关寄存器
+P0M1    DATA    0x93            ; P0M1.n,P0M0.n     =00--->Standard,    01--->push-pull
+P0M0    DATA    0x94            ;                   =10--->pure input,  11--->open drain
+P1M1    DATA    0x91            ; P1M1.n,P1M0.n     =00--->Standard,    01--->push-pull
+P1M0    DATA    0x92            ;                   =10--->pure input,  11--->open drain
+P2M1    DATA    0x95            ; P2M1.n,P2M0.n     =00--->Standard,    01--->push-pull
+P2M0    DATA    0x96            ;                   =10--->pure input,  11--->open drain
+P3M1    DATA    0xB1            ; P3M1.n,P3M0.n     =00--->Standard,    01--->push-pull
+P3M0    DATA    0xB2            ;                   =10--->pure input,  11--->open drain
+P4M1    DATA    0xB3            ; P4M1.n,P4M0.n     =00--->Standard,    01--->push-pull
+P4M0    DATA    0xB4            ;                   =10--->pure input,  11--->open drain
+P5M1    DATA    0xC9            ; P5M1.n,P5M0.n     =00--->Standard,    01--->push-pull
+P5M0    DATA    0xCA            ;                   =10--->pure input,  11--->open drain
+P6M1    DATA    0xCB            ; P6M1.n,P6M0.n     =00--->Standard,    01--->push-pull
+P6M0    DATA    0xCC            ;                   =10--->pure input,  11--->open drain
+P7M1    DATA    0xE1            ;
+P7M0    DATA    0xE2            ;
+
+
+P_SW2   DATA    0BAH	   ;--------- PXPU 上拉寄存器读写是必须先将本寄存器的第七位质1
+  ;中断优先级寄存器
+  ; IP  EQU 0B8H
+   IPH DATA 0B7H
+   IP2 DATA  0B5H
+   IP2H DATA 0B6H 
+ AUXINTIF  DATA 0EFH
+
+AUXR1   EQU 0A2H;0BAH   P_SW1---对---
+AUXR2   EQU 8FH
+ ;IO口位地址映射  
+  P54 BIT 0C8H.4
+  P55 BIT 0C8H.5
+  P41 BIT 0C0H.1
+  P42 BIT 0C0H.2
+  P44 BIT 0C0H.4
+  P45 BIT 0C0H.5
+  EADC  BIT IE.5; adc中断允许位	
+
+  ;--------------pca spw头文件
+CCON        DATA    0D8H
+CF          BIT     CCON.7
+CR          BIT     CCON.6
+CCF3        BIT     CCON.3
+CCF2        BIT     CCON.2
+CCF1        BIT     CCON.1
+CCF0        BIT     CCON.0
+CMOD        DATA    0D9H
+CL          DATA    0E9H
+CH          DATA    0F9H
+CCAPM0      DATA    0DAH
+CCAP0L      DATA    0EAH
+CCAP0H      DATA    0FAH
+PCA_PWM0    DATA    0F2H
+CCAPM1      DATA    0DBH
+CCAP1L      DATA    0EBH
+CCAP1H      DATA    0FBH
+PCA_PWM1    DATA    0F3H
+CCAPM2      DATA    0DCH
+CCAP2L      DATA    0ECH
+CCAP2H      DATA    0FCH
+PCA_PWM2    DATA    0F4H
+CCAPM3      DATA    0DDH
+CCAP3L      DATA    0EDH
+CCAP3H      DATA    0FDH
+PCA_PWM3    DATA    0F5H
+
+
+
+;----------------初始化-----------------------------------
+
+	    ORG 100H
+		 MOV 26H,#0;ADC延迟， 值为中断的次数
+		  MOV CCON,#00H;	 122页
+	  MOV CMOD,#08H	;设置为系统时钟1分频
+	  MOV CL,#00H  ;
+	  MOV  CH,#0H ;
+	  MOV CCAPM0,#42H;	 122页
+
+   ;-------------------PWMS方波配置----------------------
+
+
+
+;		SETB P3.6;
+;		SETB P3.7;  按键扫描时先写1
+
+
+  CLR     A
+    MOV     P0M1, #00000001B     ;
+    MOV     P0M0, #11111110B
+    MOV     P1M1, A     ;设置为准双向口
+    MOV     P1M0, A
+    MOV     P2M1, A     ;设置为强互补输出
+    MOV     P2M0, #00H;
+    MOV     P3M1, #11000000B; A     ; 互补输出
+    MOV     P3M0, #00110000B;  高2位设为高阻态用来做比较器输入。3.4  3.5设置为强推挽式输出推电压显示数码管
+    MOV     P4M1, A     ;设置为准双向口
+    MOV     P4M0, #00000010B  ;P41设置01为强互补输出
+    MOV     P5M1, A     ;设置为准双向口
+    MOV     P5M0, #00110000B;A	 ;
+    MOV     P6M1, A     ;设置为准双向口
+    MOV     P6M0, A
+    MOV     P7M1, A     ;设置为准双向口
+    MOV     P7M0, A
+
+	CLR P41	  ;关mos的G极
+      LJMP START
+ADC_CONTR   DATA    0BCH
+ADC_RES     DATA    0BDH
+ADC_RESL    DATA    0BEH
+ADCCFG      DATA    0DEH
+
+
+
+   ;-----------------------------------------
+ ; ORG 100H
+;LJMP 200H
+
+
+		
+	
+
+
+START:
+
+    MOV A,#0FFH	  ;
+	MOV P1,A ;	作为拨码开关输入口 所以先写1
+	SETB P3.0
+	SETB P3.1
+	SETB P3.2
+	SETB P3.3
+    SETB P0.3;	作为拨码开关输入口 所以先写1
+
+	MOV P3,A  ;
+
+	SETB 29H.3
+ 
+
+   
+   MOV 2CH,#00000001B;数码管环形位移器 个十百千交替选通。
+   
+   ;-------------------定时器1无谐振时定频输出延迟 ------------------
+ 		
+
+ 
+ T1TIME:    
+		SETB P41;开G极
+       ANL  TMOD,#01111111B ;设置定时器1开关为内部启动 只要TR1=1时就可以启动
+		ANL  TMOD,#10111111B ;设置为内部定时器 计数内部时钟
+		ANL  TMOD,#11011111B;
+		ORL   TMOD,#00010000B; 设置为模式1 16位不自动装载定时器
+		 CLR  TR1 ;定时器关
+		 SETB ET1;定时器1中断开  
+		 MOV TH1,#0
+		 MOV TL1,#0
+		ANL  AUXR,#10111111B			   ;设置为12分频
+		MOV TL1,#(255-50)
+		MOV TH1,#(255-1) ;
+     SETB TR1;
+	;CLR TR1;
+	   SETB P0.1
+	SETB  P0.2
+  	SETB 29H.7 ;T2中断置1说明无谐振 
+	;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;CLR 29H.5 ;  当前设置为非死区状态
+     CLR  P0.1 ;
+	 SETB P0.2 ;
+	ORL  IP ,#00000000B;ORL  IP ,#00001000B
+	ORL  IPH,#00000000B;ORL  IPH,#00001000B	;t1设置为最di优先级		 
+
+
+
+  ;-------------------定时器0调占空比------------------
+	 
+			 ANL  TMOD,#11110111B ;设置定时器0开关为内部启动 只要TR1=1时就可以启动
+	    	ANL  TMOD,#11111011B ;设置为内部定时器 计数内部时钟
+			ORL   TMOD,#00000001B; 设置为模式1 16位不自动装载定时器
+			CLR TR0;
+			SETB ET0 ;
+		   ANL AUXR,#01111111B;	设为12分频
+		  ORL  AUXR ,#10000000B; 设为1T模式
+			MOV TL0,#(255-50)
+		MOV TH0,#(255-4) ;
+	;	SETB TR0;
+       ORL IPH,#00000010B
+	   ANL IP, #11111101B; 	 手册152页 T0设置为较高优先级中断  
+
+  ;-------------------定时器2调数码管显示计数------------------
+ 
+   	ANL AUXR, #11101111B;  定时器2关
+	ANL  AUXR,#11110111B;设置为内部计数
+	ANL  AUXR,#11111011B;设置为12分频
+	ANL  8FH, #11111011B;	关闭溢出是输出
+	MOV  TL2,#(255-15);
+	MOV  TH2,#(255-20);
+	
+	ORL  0AFH,#00000100B;IE2.3=1   T2中断允许
+	 
+
+	 ORL AUXR, #00010000B;  定时器2开
+						   ;T2优先级固定为最低 且不更改。
+
+;------------------设置adc中断-------------------------------------  
+;    SETB P0.0
+    SETB  EA   ;
+	SETB EADC;	  adc中断允许
+
+    MOV ADC_CONTR,#88H; 打开adc电源 使能adc	后四位1000 p00设为adc入口
+	 
+	 	ANL 0BCH,#11111000B; 设置P0.0口为ad口
+
+	 ORL ADCCFG,#00111111B;		  ;输出结果右对齐
+
+	    ANL  ADCCFG,#11111111B	;SYSCLCK/2  /6  /#0011B
+
+	   ;SETB,ADC_CONTR.5;中断标志位
+ 	   ORL ADC_CONTR,#40H;启动ad转换	;	   SETB,ADC_CONTR.6; 开始adc转换，转换完后硬件自动清零本位
+		ORL  IP,#00100000B;
+		ANL IPH,#11011111B;adc中断优先级设置为较低优先级。
+
+  ; ----------------- 设置比较器中断设置 ----------------------------
+	 ORL  0E6H,#10000000B;CMPEN=1开比较器功能
+	;	  ANL  0E6H,#01111111B;	 关比较器
+	  ORL  0E6H,#00100000B;PIE=1上升沿触发中断，
+	  ORL  0E6H,#00010000B;NIE=1下降沿触发中断。
+	  ANL  0E6H,#11110111B ;PIS=0  P3.7作为比较器正输入端。
+	  ORL  0E6H,#00000100B ;nIS=0  P3.6作为比较器负输入端。
+	  ANL  0E6H,#11111101B; CMPOE=0禁止比较器结果输出到io口.
+
+
+      ANL  0E7H,#10111111B; DISFLT=0使能0.1us模拟滤波延迟.
+	  ANL  0E7H,#11000000B;LCDTY=0 关闭 数字延迟	去抖动。
+
+;	   ORL   0B5H,#00100000B;PCMP=1 设为高优先级.                                                   
+;	   ORL   0B6H,#00100000B;PCMPH=1 设为高优先级.
+       	 
+		 
+    	ORL IP2, #00100000B;	; ORL IP2, #00100000B;
+		ORL IP2H,#00100000B ;ANL IP2H,#11011111B ;比较器设置为最高优先级 ，（T2和比较器默认默认是最低）
+
+		 
+
+															  
+ ;------------------------------主函数-----------------------------------------------------------------------  		
+MAIN:  	 
+    	    JB 29H.3,FANKUIADC	; 在数码管显示中断中 加了中断次数延迟，中断次数够了就写1， 
+
+	LOOPX: NOP
+	;      CALL  ANJIAN
+		;   CALL DISPLAY
+		   JMP MAIN
+
+
+
+
+
+
+
+ ; adc转换完成  读取值	与io口值比较  若大于就配置定时器输出一段掉电延迟中断  返回
+  FANKUIADC:  CLR 29H.3
+              CPL 29H.5 ; =1  转到电压十进制转化 到24h 十位个位 25h千位百位
+			  JB 29H.5,ZHUANV
+			  MOV 27H,2DH	;
+			  MOV  28H,2EH  ;
+			  JMP VILOOP ;
+ZHUANV:   MOV  27H,2AH;
+          MOV  28H,2BH; 
+		  JMP  VILOOP
+     ;         MOV 2AH, #0FFH;ADC_RESL;;#00000001B;
+	;		  MOV A,2AH
+	  ;    MOV  2BH,#0FH;ADC_RES;#00000111B;
+		;	  MOV  A,2BH	
+    VILOOP:     CALL  CALL1Z10;
+			     JB 29H.5, JVV;
+				 MOV  22H,20H ;储存到电流数值缓存器
+				 MOV  23H,21H;
+			  	JMP IIVV;
+JVV:          MOV   24H,20H	 ; 储存到电压缓存
+              MOV   25H,21H ;
+		JMP  IIVV	  		   
+	IIVV:	 MOV A,P3;
+			  CPL A
+	;	    SETB C	;?
+	;		  DA A
+
+             ; MOV 24H,A
+			 ANL A,#00111111B	;p3的高2位是比较器，所以把高2位数据屏蔽掉设为常0.  
+			  CJNE A,21H,NEX;
+              MOV A,P1 ;千百位相等，就判断个位十位
+			  CPL A
+			
+			  DA A
+;			  MOV 23H,A
+			  CJNE A,20H,NEXT
+
+
+
+
+
+
+
+
+
+
+	 NEXT:	 JNC NEX1  ;个位十位小于p1值就 置1  29h.4，否则写0
+	          CLR 29H.4
+			  JMP LOOPX;
+		  NEX:JNC  NEX1	; 百千位小于p3值就 置1  29h.4，否则写0
+			  
+			  CLR  29H.4;  
+			  JMP  LOOPX;
+	  NEX1:  SETB 29H.4
+	          JMP  LOOPX;	    
+	     
+
+
+
+ CALL1Z10:
+          MOV R1,#0	 ;	要加的二进制位数	
+		  CLR A
+		  MOV R4,A
+		  MOV R5,A
+		  MOV R6,A
+     ;GEWEI SHIWEI
+		MOV 20H,A;
+	;BAIWEI QIANWEI
+		MOV 21H,A;
+	;WAN  SHIWAN
+	;;;;;;;;;;;;;;;;;;;;;	MOV 22H,A;
+
+		 CLR 29H.1;	高把位加标志位
+	;	CLR 2AH;前八位
+	;	CLR 2BH;后八位 
+;		MOV  2AH,#
+ ;   	MOV  2BH,#00000000B;
+
+
+
+
+		;MOV 25H,2AH;
+LOOP:  	 
+	    MOV   A,#8	 ;	   低八位顺序检测  高把位跳转到高八位寄存器
+		MOV B,R1	  ;	 
+		CJNE  A,B,GO   ;
+		JMP   GAO8;
+ GO:	INC R1	 ;		 检查位 增1
+		MOV  A,R1 ;
+		MOV R2,A ;
+    	MOV A,27H ;	二进制的十位 个位待转十进制
+SHANG:	RRC   A;		右移r1次 
+		DJNZ R2,SHANG
+		JC   XWEIJIA  ;
+LOOP1:	
+		JMP  LOOP  
+		   	
+		
+GAO8:  
+        SETB 29H.1	  ;
+  		;MOV  26H,2BH;
+LOOP2:  MOV  A,#11H	 ; 位数等于17位时结束 ，说明两个八位寄存器二进制转完毕
+		MOV  B,R1;
+		CJNE A,B,GO2;
+		
+		JMP  OVER;
+ GO2:
+        INC R1
+		MOV A,R1
+		SUBB A,#8
+		CLR AC
+		MOV R2,A
+		
+           MOV A,28H
+ SHANG1:   RRC  A
+		
+	    	DJNZ R2,SHANG1
+
+
+		JC XWEIJIA
+LOOP3:		
+		JMP LOOP2  
+
+;  JIAN8X:SUBB A,#8
+  ;    JMP  JIAN8HH
+; JIAN8:SUBB A,#8
+    ;  JMP  JIAN8H
+	JINWEI1: SETB 	29H.2 ;cY
+         JMP JW1
+JINWEI2: SETB C
+          CLR 29H.2
+          JMP JW2
+XWEIJIA:   
+          MOV DPTR,#TAB		  
+    	  MOV A,R1
+		  ;JB 29H.1,JIAN8
+
+JIAN8H:	  DEC A
+		  MOV B ,#2
+		  MUL AB 
+		  MOVC A,@A+DPTR
+		  CLR  C	 
+		  ADDC A,20H	;二进制的低八位相加  并且低八位有进位存到29h.2中
+		  DA A
+		  JC  JINWEI1
+JW1:      CLR C
+		  MOV  20H,A
+		  
+
+		   
+		 
+
+
+		  MOV A,R1
+		    ;JB 29H.1,JIAN8X
+JIAN8HH:  DEC  A
+		  MOV  B,#2
+		  MUL AB
+		  INC A
+           MOVC A,@A+DPTR
+		  MOV B,#0
+		  JB 29H.2,JINWEI2
+	JW2:  
+	      ADDC A,B
+		  CLR CY
+  		  ADDC A,21H
+		 DA A
+		  MOV 21H,A
+	
+                 MOV B,#0
+		 ;  MOV A,22H
+		  ; ADDC	A,B
+		   ;DA A
+		   ;MOV 22H,A
+		   JB 29H.1, LOOP3
+		   JMP LOOP1
+ OVER: 	   MOV R4,20H
+           MOV R5,21H
+		   ;MOV R6,22H
+		   RET
+
+
+ ;--------------------------------------
+
+
+
+TABLE:	DB 0C0h,0F9H,0A4H,0b0H,99H,92H,82H,0F8H,80H,90H	;表：共阳数码管 0-9 
+
+
+           
+		   
+		   
+		   
+
+
+		   
+		   
+		   
+		   
+		   
+		   
+		   
+		   
+		   
+		   
+		   
+		   
+		   
+		   
+		    
+
+;------------比较器中断处理 输出  ------------------------       
+			  ORG  350H
+	JCMP:	  PUSH  ACC
+		  PUSH PSW
+		   SETB RS0
+		   SETB RS1
+		ANL CMPCR1,#10111111B;这里要注意 比较器中断必须软件清零 。	
+		;	CPL P41
+		    CLR TR0;定时器0关断，
+			JNB 29H.7,LCOK;=0时跳转到非T1中断状态
+			CLR 29H.7; 
+
+
+			 MOV  TL1,#(255-250);
+         	MOV  TH1,#(255-250);
+	    	 SETB TR1;  定时器1周期宽度设置  调频
+
+		;	 JB 29H.5,BIJIAOEND; 29h.5=1时 说明处在死区状态，此时是T2中断状态 所以不改变输出 并清0 T2计时lc半周期谐振时长
+			 JMP  BIJIAOEND
+	LCOK:	
+          
+			  CLR C
+
+			  MOV A, P1;
+			;	CPL A   ;
+				MOV TL0,A;
+				;CLR C ;
+							  ;
+				;MOV C,P0.3 ;
+				;CLR A;
+				;MOV ACC.0,C;
+				;CPL A
+
+			  	MOV A ,P3
+				ANL A,#00001111B
+				ORL A,#11110000B
+				MOV  TH0,A;	 9位二进制数设置为导通宽度   
+
+               
+		   SETB TR0; 			导通宽度开 调幅
+			   ; ANL AUXR, #11101111B;  定时器2关
+		        CLR  TR1
+	
+            MOV  TL1,#(255-200);
+         	MOV  TH1,#(255-250);
+	    	 SETB TR1;  定时器1周期宽度设置  调频
+
+
+	LCNO1:   MOV A,CMPCR1;手册279页介绍	 比较器状态
+		     JB ACC.0, FALLING;
+           	;	   SETB P0.2;
+		       ;    CLR  P0.1 ;
+		   
+		     CLR  P0.2	  ;
+			 SETB P0.1	   ;
+			 
+			 JMP  BIJIAOEND	;
+ FALLING:  NOP
+		  ;CLR  P0.2	  ;
+		  ;SETB P0.1	   ;
+			 
+		 SETB P0.2;
+		  CLR  P0.1 ;
+BIJIAOEND: 		ANL CMPCR1,#10111111B;这里要注意 比较器中断必须软件清零 。
+           CLR RS0	;
+		   CLR RS1	 ;
+		   POP PSW	;
+		   POP ACC	;
+		   RETI		  
+
+
+   ;--------------------------------------------
+	;adc中断入口
+	  ORG  400H
+  JADC:
+     	 PUSH PSW
+
+         PUSH ACC
+		 SETB RS0
+		 CLR RS1
+
+		 CPL 28H.0 ;电压电流交替采样的标志位。 =1时 采样电压 =0时采样电流
+		 JB 28H.0,VCC
+		 JMP  ICC
+    VCC: MOV 2AH,ADC_RESL;#00000001B;ADC_RESL; 	12位转换数据的低八位存到2ah中
+
+	
+    	MOV  2BH,ADC_RES ;#00000001B;ADC_RES ;	 高四位二进制数据存到2bh中
+		CLR A 
+		MOV  ADC_RESL,A
+		MOV   ADC_RES,A
+	;	 SETB 29H.3;   转换完成一次写1
+		   ANL ADC_CONTR,#11011111B ; ANL ADC_CONTR,#NOT20H;CLR ADC_FLAG;清除中断标志位
+		  	 ANL  0BCH,#11111011B  ;切换到p03口电流采样
+			 ORL  0BCH,#00001011B; 
+		     ORL ADC_CONTR,#40H;启动ad转换	;	   SETB,ADC_CONTR.6; 开始adc转换，转换完后硬件自动清零本位
+ 		
+			 JMP 	VCCOVER
+  ICC:     MOV 2DH,ADC_RESL;#00000001B;ADC_RESL; 	12位转换数据的低八位存到2ah中
+
+	
+    	MOV  2EH,ADC_RES ;#00000001B;ADC_RES ;	 高四位二进制数据存到2bh中
+		CLR A 
+		MOV  ADC_RESL,A
+		MOV   ADC_RES,A
+	;	 SETB 29H.3;   转换完成一次写1
+		   ANL ADC_CONTR,#11011111B ; ANL ADC_CONTR,#NOT20H;CLR ADC_FLAG;清除中断标志位
+		    ANL 0BCH,#11111000B;
+			ORL 0BCH,#00001000B; 切换到p00口 采样电压
+			 ORL ADC_CONTR,#40H;启动ad转换	;	   SETB,ADC_CONTR.6; 开始adc转换，转换完后硬件自动清零本位
+VCCOVER:	  CLR RS0
+		   CLR RS1
+		   POP ACC
+		   POP PSW
+            RETI
+
+
+
+ ;------------定时器0中断用来占空比的导通角延迟
+
+		  ORG 450H
+    	  PUSH  ACC
+		  PUSH PSW
+		   SETB RS0
+		   SETB RS1
+
+		     
+;		   	  MOV TH2,#00100111B;111111111111111111复位T2的值
+;			   MOV TL2,#00010000B;
+ ;            SETB 29H.5;  T0延迟导通状态结束 开启死区状态标志位。  
+  
+	;	 	SETB CMPEN ;开比较器
+		    ORL  0E6H,#00110000B;	   在死区时 开启比较器中断 
+		  ;  ANL  0E6H,#01000000B; 这写错了 ！！！！ 清除中断标志位	 xxxxxxxxxxxxxxxxxxxxxxxxxxxxx
+		  	ANL  0E6H,#10111111B;清除中断标志位
+		  SETB P0.1
+		   SETB P0.2
+	
+		   CLR TR0
+
+		   CLR RS0
+		   CLR RS1
+		   POP PSW
+		   POP ACC
+		    RETI  
+
+; ------------T1中断调频计数  ----------------------
+	  ORG 550H
+       PUSH PSW
+          PUSH  ACC				 
+		  CLR RS0
+		  SETB RS1
+
+
+
+
+
+            SETB 29H.7; 谐振标志位
+
+	         ANL  0E6H,#11001111B	;  CLR  CMPEN;关掉比较器中断
+			    
+		 
+
+		   ANL  0E6H,#10111111B ;清零比较器中断标志位
+
+		 ;  CPL 29H.5
+		  ; JNB 29H.5 ,NEXX;	死区标志位	  =0时当前为死区状态 需要进入非死区设置
+		  ; MOV C, P0.1	 ;	死区标志位等于1时储存p0.4 到29h.6
+		   ;MOV 29H.6 ,C	 ;储存原来G极状态 进入死区状态
+		/*	CPL 29H.6
+
+		;	CPL P3.2
+			MOV C,29H.6
+			MOV P0.1,C
+
+			MOV  C,29H.6			   ;11111111111111111111111111111111111111111111111111111
+			CPL C
+			MOV P0.2,C
+			CLR A              */
+		
+		  
+
+
+		  
+		 ;	SETB CMPEN ;开比较器
+		  ;ORL  0E6H,#00110000B;	   在死区时 开启比较器中断 
+		 ; ORL  0E6H,#01000000B;   清除中断标志位
+
+		   ;SETB P0.1	;
+		   ;SETB P0.2	;
+		    ;NOP
+			;NOP
+		
+			
+
+	;	   JMP O0 		;
+	;	NEXX:
+	;		MOV  C,29H.6 ; 这里根据上次状态翻转 
+
+	;		MOV P0.1,C;
+	;	    CPL P0.1	;
+	;	   JB P0.1,O1  ;
+	;		SETB P0.2  ;
+	;		JMP  O0		;
+	 ;  O1:  CLR P0.2   ;
+	           
+		   
+
+	O0 : 	MOV  TL1,#(255-15);
+         	MOV  TH1,#(255-200);
+	    	 SETB TR1;  定时器1周期宽度设置  调频
+		
+			 INC R1
+			 MOV A,R1
+			 CJNE A,#5, T1END
+			  MOV R1,#00H
+		
+		
+			CPL 29H.6
+
+		;	CPL P3.2
+			MOV C,29H.6
+			MOV P0.1,C
+
+			MOV  C,29H.6			   ;11111111111111111111111111111111111111111111111111111
+			CPL C
+			MOV P0.2,C
+			CLR A
+			
+				  
+	      	    MOV A, P1;
+	;			CPL A   ;
+				MOV TL0,A;
+				CLR C ;
+							  ;
+				MOV C,P0.3 ;
+				CLR A;
+				MOV ACC.0,C;
+				MOV A ,P3
+				ANL A,#00001111B
+				ORL A,#11110000B
+				MOV  TH0,A;	 9位二进制数设置为导通宽度   
+			;	MOV  TH0,#(255-15);
+              ; CLR TR0
+		  SETB TR0; 			导通宽度开 调幅
+
+
+T1END:	  CLR RS1
+		  CLR RS0
+		  POP ACC
+		  POP PSW  
+		  RETI		  
+			
+
+  ;------------定时器2中断延迟数码管输出
+		   ORG 650H
+    JJT2:  PUSH ACC
+		   PUSH PSW
+		   SETB RS0
+		   SETB RS1
+		   CLR TR1		  ;关T1
+		   CLR TR0		 ;	关T0
+		   ANL  0E6H,#11001111B;关比较器
+	   	;	   CLR TF1
+		 ANL AUXINTIF,#11111110B;t2中断标志位要注意 必须软件清零  
+	;	   MOV 20H,#00010001B;
+	;	  MOV 21H,#00010001B;111111111111111111111111111111111111111111111111111111111111
+		  JNB 29H.4,GH	 ; 29.4不等于1说明adc测得电压小于预设电压 转到G极输出低
+	;	  SETB P55;
+		  JMP P5H ;
+ GH :    ;  CLR  P55;   这里控制G极变压
+           CLR 29H.4 	
+		  
+ P5H:      INC 26H
+		   MOV A,26H
+		   CJNE A,#250,DISPLA
+		   CLR 26H
+
+		  
+ 	 SETB 29H.3
+	 ; CLR  29H.3	 
+	DISPLA:	  MOV DPTR,#TABLE
+		   CLR A 
+		  MOV A,2CH
+		  RL A
+		  MOV  2CH,A	
+		  JB 2CH.0,GEWEI
+		  JB 2CH.1,SHIWEI
+		  JB 2CH.2,BAIWEI
+		  JB 2CH.3,QIANWEI
+		  JB 2CH.4,GEWEII
+		  JB 2CH.5,SHIWEIIJ
+		  JB 2CH.6,BAIWEIIJ
+		  JB 2CH.7,QIANWEIIJ
+		  JMP  QIANWEII
+  GEWEI:  CLR P0.5
+          CLR P0.6
+		  CLR P0.4
+		  CLR P3.5
+		  CLR P3.4
+		  CLR P55
+		  CLR P54
+         SETB P0.7
+          MOV A, 24H
+		  ANL A,#00001111B
+		  MOVC A,@A+DPTR 
+		  MOV P2,A
+		  JMP DISPLAYEND
+  SHIWEI:  
+          CLR P0.4		 ;1111111111111111111111111改为p0.123
+		  CLR P0.7 
+          CLR P0.5
+           SETB P0.6
+
+		  CLR P3.5
+		  CLR P3.4
+		  CLR P55
+		  CLR P54
+
+           MOV A, 24H
+		  ANL A,#11110000B
+		  SWAP  A
+		  MOVC A,@A+DPTR 
+		  MOV P2,A
+          JMP DISPLAYEND
+  BAIWEI: CLR P0.6
+          
+		  CLR P0.7 
+          CLR P0.4
+          SETB P0.5
+
+		  CLR P3.5
+		  CLR P3.4
+		  CLR P55
+		  CLR P54
+           MOV A, 25H
+		  ANL A,#00001111B
+		  MOVC A,@A+DPTR 
+		  MOV P2,A
+          JMP DISPLAYEND
+  QIANWEI: CLR P0.5
+           CLR P0.7
+		   
+           CLR  P0.6
+           SETB P0.4
+		  CLR P3.5
+		  CLR P3.4
+		  CLR P55
+		  CLR P54
+
+           MOV A, 25H
+		  ANL A,#11110000B
+		  SWAP	A
+		  MOVC A,@A+DPTR 
+		  MOV P2,A
+          JMP DISPLAYEND
+
+  SHIWEIIJ:JMP SHIWEII	;  跳转站点
+  BAIWEIIJ: JMP BAIWEII
+  QIANWEIIJ:JMP QIANWEII
+  GEWEII:  CLR P0.5
+          CLR P0.6
+		  CLR P0.4
+		  
+		  ;CLR P3.5
+		  CLR P3.4
+		  CLR P55
+		  CLR P54
+		  CLR  P0.3 
+         SETB P3.5 ;SETB P0.7
+          MOV A, 22H ;
+		  ANL A,#00001111B
+		  MOVC A,@A+DPTR 
+		  MOV P2,A
+		  JMP DISPLAYEND
+  SHIWEII:  
+          CLR P0.4		 ;1111111111111111111111111改为p0.123
+		  CLR P0.7 
+          CLR P0.5
+           SETB P3.4;SETB P0.6
+		   CLR P0.6
+		  CLR P3.5
+		  ;CLR P3.4
+		  CLR P55
+		  CLR P54
+
+           MOV A, 22H
+		  ANL A,#11110000B
+		  SWAP  A
+		  MOVC A,@A+DPTR 
+		  MOV P2,A
+          JMP DISPLAYEND
+  BAIWEII: CLR P0.6
+          
+		  CLR P0.7 
+          CLR P0.4
+            SETB P55; SETB P0.5
+		  CLR P0.5 ;
+		  CLR P3.5	;
+		  CLR P3.4	;
+		  ;CLR P5.5
+		  CLR P54
+           MOV A, 23H
+		  ANL A,#00001111B
+		  MOVC A,@A+DPTR 
+		  MOV P2,A
+          JMP DISPLAYEND
+  QIANWEII: CLR P0.5
+           CLR P0.7
+		   
+           CLR  P0.6
+           ;SETB P0.4
+		    CLR  P0.4
+			SETB P54;
+		  CLR P3.5
+		  CLR P3.4
+		  CLR P55
+		;  CLR P54
+
+           MOV A, 23H
+		  ANL A,#11110000B
+		  SWAP	A
+		  MOVC A,@A+DPTR 
+		  MOV P2,A
+          JMP DISPLAYEND
+
+DISPLAYEND:NOP 
+
+
+		  MOV TL2,#(255-50);设置下一次中断
+		  MOV TH2,#(255-10) 
+		  		  
+		 ORL AUXR, #00010000B;
+		;; CPL P54
+	;;;;;;;;;;;	 MOV C,P54
+	;;;	 CPL C
+	;	 MOV P55,C
+       SETB TR1
+	    SETB TR0		   
+		 ;;;;;BUG  这里写错！！！  ORL  0E6H,#01100000B;开比较器
+		   ORL  0E6H,#00110000B;开比较器
+		   CLR RS0
+		   CLR RS1
+		   POP PSW
+		   POP ACC
+		    RETI
+ 
+	;-------------------十进制码  这部分是二进制转十进制算法 方法是把二进制每一位写成十进制格式 比如#00000111B写成十进制 01+02+04
+TAB:  DB 01H ,00H,02H,00H,04H, 00H,08H,00H																					 
+        DB 16H, 00H,32H,00H,64H,00H, 28H,01H
+		DB 56H,02H, 12H,05H,24H,10H, 48H,20H
+		DB 96H,40H, 92H,81H
+
+		 END
+
+                 
+
+
+
+
+
+	  
+	  	   
+	   
+	 
+	 
+	 
+	   
+	   
+	    							    
